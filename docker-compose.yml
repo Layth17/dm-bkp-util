@@ -1,0 +1,11 @@
+services:
+  dm-retriever:
+    build: .
+    container_name: dm-retriever
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # Change the left number to use a different host port
+    volumes:
+      - ./downloads:/downloads   # Videos land in ./downloads on your machine
+    environment:
+      - DOWNLOAD_DIR=/downloads
