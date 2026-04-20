@@ -133,11 +133,16 @@ def run_download(job_id: str, username: str, quality: str,
         root.mkdir(parents=True, exist_ok=True)
 
         archive_path = root / ".download_archive"
-        resuming     = archive_path.exists()
-        log(f"📂  Output directory: {root}")
-        if resuming:
-            log(f"♻️   Resuming — archive found, already-downloaded videos will be skipped.")
+        if archive_path.exists():
+            archived = {
+                line.split()[1] for line in archive_path.read_text().splitlines()
+                if len(line.split()) == 2
+            }
+            log(f"📂  Output directory: {root}")
+            log(f"♻️   Resuming — {len(archived)} video(s) already in archive, will be skipped instantly.")
         else:
+            archived = set()
+            log(f"📂  Output directory: {root}")
             log(f"🆕  Fresh download — starting from scratch.")
 
         fmt = "bestvideo+bestaudio/best" if quality == "best" \
@@ -237,12 +242,16 @@ def run_download(job_id: str, username: str, quality: str,
             manifest = {"id": pl_id, "name": pl.get("name"), "video_ids": video_ids}
             (pl_dir / "_playlist_info.json").write_text(json.dumps(manifest, indent=2))
 
+            pending = [v for v in video_ids if v not in archived]
+            skipped = len(video_ids) - len(pending)
+            if skipped:
+                log(f"    Skipping {skipped} already-downloaded, {len(pending)} remaining.")
             with yt_dlp.YoutubeDL(make_opts(pl_dir)) as ydl:
-                for v_idx, vid_id in enumerate(video_ids, 1):
+                for v_idx, vid_id in enumerate(pending, 1):
                     check_control()
                     if v_idx > 1:
                         time.sleep(2)
-                    log(f"  ⬇  [{v_idx}/{len(video_ids)}] {vid_id}")
+                    log(f"  ⬇  [{v_idx}/{len(pending)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
                     except StopRequested:
@@ -256,12 +265,16 @@ def run_download(job_id: str, username: str, quality: str,
             unc_dir = root / "_Uncategorized"
             unc_dir.mkdir(parents=True, exist_ok=True)
             log(f"\n▶  Uncategorized ({len(uncategorized)} video(s))")
+            pending_unc = [v for v in sorted(uncategorized) if v not in archived]
+            skipped_unc = len(uncategorized) - len(pending_unc)
+            if skipped_unc:
+                log(f"    Skipping {skipped_unc} already-downloaded, {len(pending_unc)} remaining.")
             with yt_dlp.YoutubeDL(make_opts(unc_dir)) as ydl:
-                for v_idx, vid_id in enumerate(sorted(uncategorized), 1):
+                for v_idx, vid_id in enumerate(pending_unc, 1):
                     check_control()
                     if v_idx > 1:
                         time.sleep(2)
-                    log(f"  ⬇  [{v_idx}/{len(uncategorized)}] {vid_id}")
+                    log(f"  ⬇  [{v_idx}/{len(pending_unc)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
                     except StopRequested:
