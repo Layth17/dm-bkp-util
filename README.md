@@ -1,3 +1,5 @@
+Disclosure: This project is largely vibe coded and is still a W.I.P (it does work, though).
+
 # DM Retriever — Setup & Usage
 
 A local web UI for downloading your Dailymotion channel content, organized by playlist.
