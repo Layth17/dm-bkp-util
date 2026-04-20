@@ -89,7 +89,8 @@ class QueueLogger:
         self.q = q
 
     def debug(self, msg):
-        if msg.startswith("[debug]"):
+        # suppress yt-dlp debug noise and raw download-progress lines
+        if msg.startswith("[debug]") or msg.startswith("[download]"):
             return
         self.q.put(msg)
 
@@ -104,7 +105,8 @@ class QueueLogger:
 
 
 def run_download(job_id: str, username: str, quality: str,
-                 skip_uncategorized: bool, cookies_path: Optional[str]):
+                 skip_uncategorized: bool, cookies_path: Optional[str],
+                 selected_playlist_ids: Optional[list[str]] = None):
     job = jobs[job_id]
     log_q: queue.Queue = job["log_queue"]
 
@@ -120,6 +122,25 @@ def run_download(job_id: str, username: str, quality: str,
               else f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
 
         def make_opts(out_dir: Path) -> dict:
+            last_prog_time = [0.0]
+
+            def progress_hook(d):
+                if d["status"] == "downloading":
+                    now = time.monotonic()
+                    if now - last_prog_time[0] < 1.0:
+                        return
+                    last_prog_time[0] = now
+                    downloaded = d.get("downloaded_bytes", 0)
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                    pct = (downloaded / total * 100) if total else 0
+                    speed = d.get("speed") or 0
+                    eta = d.get("eta")
+                    speed_str = f"{speed / 1_048_576:.1f} MiB/s" if speed else "—"
+                    eta_str = f"{int(eta) // 60}:{int(eta) % 60:02d}" if eta else "—"
+                    log_q.put(f"__PROG__{pct:.1f}|{speed_str}|{eta_str}")
+                elif d["status"] == "finished":
+                    log_q.put("__PROG__DONE__")
+
             opts = {
                 "format": fmt,
                 "outtmpl": str(out_dir / "%(title)s [%(id)s].%(ext)s"),
@@ -133,6 +154,7 @@ def run_download(job_id: str, username: str, quality: str,
                 "retries": 5,
                 "fragment_retries": 5,
                 "logger": QueueLogger(log_q),
+                "progress_hooks": [progress_hook],
                 "quiet": True,
             }
             if cookies_path:
@@ -142,7 +164,13 @@ def run_download(job_id: str, username: str, quality: str,
         # 1. Fetch playlists
         log(f"📋  Fetching playlists for @{username}…")
         playlists = get_playlists(username)
-        log(f"    Found {len(playlists)} playlist(s).")
+
+        # Filter to selected playlists if provided
+        if selected_playlist_ids is not None:
+            selected_set = set(selected_playlist_ids)
+            playlists = [pl for pl in playlists if pl["id"] in selected_set]
+
+        log(f"    Downloading {len(playlists)} playlist(s).")
 
         # 2. Fetch all video IDs
         log(f"🎞  Fetching full video list…")
@@ -167,8 +195,8 @@ def run_download(job_id: str, username: str, quality: str,
             (pl_dir / "_playlist_info.json").write_text(json.dumps(manifest, indent=2))
 
             with yt_dlp.YoutubeDL(make_opts(pl_dir)) as ydl:
-                for vid_id in video_ids:
-                    log(f"  ⬇  {vid_id}")
+                for v_idx, vid_id in enumerate(video_ids, 1):
+                    log(f"  ⬇  [{v_idx}/{len(video_ids)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
                     except Exception as exc:
@@ -181,8 +209,8 @@ def run_download(job_id: str, username: str, quality: str,
             unc_dir.mkdir(parents=True, exist_ok=True)
             log(f"\n▶  Uncategorized ({len(uncategorized)} video(s))")
             with yt_dlp.YoutubeDL(make_opts(unc_dir)) as ydl:
-                for vid_id in uncategorized:
-                    log(f"  ⬇  {vid_id}")
+                for v_idx, vid_id in enumerate(uncategorized, 1):
+                    log(f"  ⬇  [{v_idx}/{len(uncategorized)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
                     except Exception as exc:
@@ -211,6 +239,15 @@ def make_job_id(username: str) -> str:
     return f"{slug}_{ts}"
 
 
+@app.get("/api/channel/playlists")
+async def channel_playlists(username: str):
+    try:
+        playlists = get_playlists(username)
+        return playlists
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @app.post("/api/start")
 async def start_download(
     background_tasks: BackgroundTasks,
@@ -218,6 +255,7 @@ async def start_download(
     quality: str   = Form("best"),
     skip_uncategorized: bool = Form(False),
     subfolder: str = Form(""),
+    playlist_ids: str = Form(""),   # JSON array string, empty = all
     cookies: Optional[UploadFile] = File(None),
 ):
     job_id = make_job_id(username)
@@ -228,6 +266,14 @@ async def start_download(
         tmp.write(await cookies.read())
         tmp.close()
         cookies_path = tmp.name
+
+    # Parse selected playlist IDs
+    selected_ids: Optional[list[str]] = None
+    if playlist_ids.strip():
+        try:
+            selected_ids = json.loads(playlist_ids)
+        except Exception:
+            pass
 
     # Resolve output: /downloads/{subfolder}/{job_id}  or  /downloads/{job_id}
     sub      = subfolder.strip().strip("/")
@@ -243,7 +289,7 @@ async def start_download(
 
     thread = threading.Thread(
         target=run_download,
-        args=(job_id, username, quality, skip_uncategorized, cookies_path),
+        args=(job_id, username, quality, skip_uncategorized, cookies_path, selected_ids),
         daemon=True,
     )
     thread.start()

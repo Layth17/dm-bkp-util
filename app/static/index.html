@@ -227,8 +227,8 @@
   .file-drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .file-drop.has-file { border-color: var(--green-dim); color: var(--green); }
 
-  /* ── Button ── */
-  .btn-start {
+  /* ── Buttons ── */
+  .btn {
     width: 100%;
     margin-top: 1.4rem;
     background: transparent;
@@ -247,13 +247,13 @@
     overflow: hidden;
   }
 
-  .btn-start:hover:not(:disabled) {
+  .btn:hover:not(:disabled) {
     background: var(--green-dim);
     color: #fff;
     box-shadow: 0 0 20px var(--green-glow);
   }
 
-  .btn-start:disabled {
+  .btn:disabled {
     opacity: .35;
     cursor: not-allowed;
     border-color: var(--muted);
@@ -266,7 +266,64 @@
     50%      { box-shadow: 0 0 22px var(--green-glow), 0 0 40px var(--green-glow); }
   }
 
-  .btn-start.running { animation: pulse-border 1.6s ease-in-out infinite; }
+  .btn.running { animation: pulse-border 1.6s ease-in-out infinite; }
+
+  /* ── Playlist selector ── */
+  .playlist-panel { display: none; }
+  .playlist-panel.visible { display: block; }
+
+  .pl-controls {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: .9rem;
+    font-size: .72rem;
+    color: var(--muted);
+  }
+
+  .pl-controls a {
+    color: var(--green-dim);
+    cursor: pointer;
+    text-decoration: underline;
+    letter-spacing: .05em;
+  }
+
+  .pl-controls a:hover { color: var(--green); }
+
+  .pl-list {
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: .3rem;
+  }
+
+  .pl-list::-webkit-scrollbar { width: 4px; }
+  .pl-list::-webkit-scrollbar-track { background: transparent; }
+  .pl-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .pl-item {
+    display: flex;
+    align-items: center;
+    gap: .7rem;
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 1px;
+    font-size: .8rem;
+    transition: border-color .15s;
+  }
+
+  .pl-item:hover { border-color: var(--green-dim); }
+
+  .pl-item .pl-name { flex: 1; color: var(--text); }
+  .pl-item .pl-count { color: var(--muted); font-size: .72rem; white-space: nowrap; }
+
+  .pl-loading {
+    color: var(--muted);
+    font-size: .8rem;
+    padding: .8rem 0;
+    text-align: center;
+  }
 
   /* ── Terminal log ── */
   .terminal {
@@ -293,6 +350,35 @@
   .log-line.warn   { color: var(--amber); }
   .log-line.err    { color: var(--red); }
   .log-line.muted  { color: var(--muted); }
+
+  /* inline progress bar inside terminal */
+  .prog-line {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .15rem 0;
+    font-size: .8rem;
+    color: var(--green-dim);
+  }
+
+  .prog-bar {
+    flex: 1;
+    height: 6px;
+    background: #1a2e22;
+    border-radius: 3px;
+    overflow: hidden;
+    max-width: 200px;
+  }
+
+  .prog-bar-fill {
+    height: 100%;
+    background: var(--green);
+    border-radius: 3px;
+    transition: width .5s linear;
+    box-shadow: 0 0 6px var(--green-glow);
+  }
+
+  .prog-meta { color: var(--muted); font-size: .75rem; white-space: nowrap; }
 
   .cursor {
     display: inline-block;
@@ -420,7 +506,22 @@
       </div>
     </div>
 
-    <button class="btn-start" id="btnStart" onclick="startDownload()">
+    <button class="btn" id="btnFetch" onclick="fetchPlaylists()">
+      ⊞ &nbsp; Fetch Playlists
+    </button>
+  </div>
+
+  <!-- Playlist selection panel (shown after fetch) -->
+  <div class="panel playlist-panel" id="playlistPanel" data-label="Playlist Selection">
+    <div class="pl-controls">
+      <span id="plCount">0 playlists</span>
+      <a onclick="selectAll(true)">Select All</a>
+      <a onclick="selectAll(false)">Deselect All</a>
+    </div>
+    <div class="pl-list" id="plList">
+      <div class="pl-loading">Loading…</div>
+    </div>
+    <button class="btn" id="btnStart" onclick="startDownload()">
       ▶ &nbsp; Start Download
     </button>
   </div>
@@ -450,6 +551,7 @@
 let currentJobId   = null;
 let currentEvtSrc  = null;
 let jobsCache      = {};
+let fetchedPlaylists = [];   // [{id, name, videos_total}]
 
 // ── File drop ────────────────────────────────────────────────────────────────
 document.getElementById('cookiesFile').addEventListener('change', function () {
@@ -464,6 +566,67 @@ document.getElementById('cookiesFile').addEventListener('change', function () {
   }
 });
 
+// ── Playlist fetch & render ───────────────────────────────────────────────────
+async function fetchPlaylists() {
+  const username = document.getElementById('username').value.trim();
+  if (!username) {
+    appendLog('✗  Please enter a channel username.');
+    return;
+  }
+
+  const btn = document.getElementById('btnFetch');
+  btn.disabled = true;
+  btn.textContent = '⊞  Fetching…';
+
+  const panel = document.getElementById('playlistPanel');
+  const list  = document.getElementById('plList');
+  panel.classList.add('visible');
+  list.innerHTML = '<div class="pl-loading">Contacting Dailymotion API…</div>';
+
+  try {
+    const res  = await fetch(`/api/channel/playlists?username=${encodeURIComponent(username)}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    fetchedPlaylists = data;
+    renderPlaylists();
+  } catch (e) {
+    list.innerHTML = `<div class="pl-loading" style="color:var(--red)">✗  ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⊞  Re-fetch Playlists';
+  }
+}
+
+function renderPlaylists() {
+  const list = document.getElementById('plList');
+  const countEl = document.getElementById('plCount');
+  countEl.textContent = `${fetchedPlaylists.length} playlist(s)`;
+
+  if (!fetchedPlaylists.length) {
+    list.innerHTML = '<div class="pl-loading">No playlists found.</div>';
+    return;
+  }
+
+  list.innerHTML = fetchedPlaylists.map((pl, i) => `
+    <div class="pl-item">
+      <label class="cb" style="flex-shrink:0;">
+        <input type="checkbox" class="pl-cb" data-id="${pl.id}" checked />
+        <span class="cb-box"></span>
+      </label>
+      <span class="pl-name">${escHtml(pl.name || pl.id)}</span>
+      <span class="pl-count">${pl.videos_total ?? '?'} videos</span>
+    </div>
+  `).join('');
+}
+
+function selectAll(checked) {
+  document.querySelectorAll('.pl-cb').forEach(cb => cb.checked = checked);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 // ── Logging helpers ───────────────────────────────────────────────────────────
 function classifyLine(msg) {
   if (msg.startsWith('✅') || msg.startsWith('▶') || msg.startsWith('⬇'))  return 'ok';
@@ -475,7 +638,6 @@ function classifyLine(msg) {
 
 function appendLog(msg) {
   const t = document.getElementById('terminal');
-  // Remove placeholder cursor span if present
   const cursor = t.querySelector('.cursor');
 
   const line = document.createElement('div');
@@ -487,9 +649,42 @@ function appendLog(msg) {
   t.scrollTop = t.scrollHeight;
 }
 
+// Progress bar — reuse a single element, updating it in place
+let progEl = null;
+
+function updateProgress(pct, speed, eta) {
+  const t = document.getElementById('terminal');
+  const cursor = t.querySelector('.cursor');
+
+  if (!progEl || !t.contains(progEl)) {
+    progEl = document.createElement('div');
+    progEl.className = 'prog-line';
+    progEl.innerHTML = `
+      <div class="prog-bar"><div class="prog-bar-fill" style="width:0%"></div></div>
+      <span class="prog-pct"></span>
+      <span class="prog-meta"></span>
+    `;
+    if (cursor) t.insertBefore(progEl, cursor);
+    else        t.appendChild(progEl);
+  }
+
+  progEl.querySelector('.prog-bar-fill').style.width = Math.min(pct, 100) + '%';
+  progEl.querySelector('.prog-pct').textContent = pct.toFixed(1) + '%';
+  progEl.querySelector('.prog-meta').textContent = `${speed} · ETA ${eta}`;
+  t.scrollTop = t.scrollHeight;
+}
+
+function clearProgress() {
+  if (progEl && progEl.parentNode) {
+    progEl.parentNode.removeChild(progEl);
+  }
+  progEl = null;
+}
+
 function clearLog() {
   const t = document.getElementById('terminal');
   t.innerHTML = '<span class="cursor"></span>';
+  progEl = null;
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -505,18 +700,32 @@ async function startDownload() {
   const username = document.getElementById('username').value.trim();
   if (!username) { appendLog('✗  Please enter a channel username.'); return; }
 
+  // Gather selected playlist IDs
+  const checkedBoxes = document.querySelectorAll('.pl-cb:checked');
+  const selectedIds  = Array.from(checkedBoxes).map(cb => cb.dataset.id);
+  // If all are checked, send empty (= download all) — slight optimisation
+  const allIds = fetchedPlaylists.map(p => p.id);
+  const sendIds = (selectedIds.length === allIds.length) ? [] : selectedIds;
+
+  if (fetchedPlaylists.length > 0 && selectedIds.length === 0) {
+    appendLog('⚠  No playlists selected.');
+    return;
+  }
+
   if (currentEvtSrc) { currentEvtSrc.close(); currentEvtSrc = null; }
 
   clearLog();
   setStatus('running', `connecting — @${username}`);
   document.getElementById('btnStart').disabled = true;
   document.getElementById('btnStart').classList.add('running');
+  document.getElementById('btnFetch').disabled = true;
 
   const fd = new FormData();
-  fd.append('username',          username);
-  fd.append('quality',           document.getElementById('quality').value);
-  fd.append('subfolder',         document.getElementById('subfolder').value.trim());
+  fd.append('username',           username);
+  fd.append('quality',            document.getElementById('quality').value);
+  fd.append('subfolder',          document.getElementById('subfolder').value.trim());
   fd.append('skip_uncategorized', document.getElementById('skipUncat').checked);
+  fd.append('playlist_ids',       JSON.stringify(sendIds));
   const cookieFile = document.getElementById('cookiesFile').files[0];
   if (cookieFile) fd.append('cookies', cookieFile);
 
@@ -547,7 +756,18 @@ async function startDownload() {
     if (msg === '__PING__') return;
     if (msg === '__DONE__') {
       currentEvtSrc.close();
+      clearProgress();
       finishJob(jobId);
+      return;
+    }
+    // Progress update
+    if (msg.startsWith('__PROG__')) {
+      if (msg === '__PROG__DONE__') {
+        clearProgress();
+      } else {
+        const parts = msg.slice(8).split('|');   // strip '__PROG__'
+        updateProgress(parseFloat(parts[0]), parts[1] || '—', parts[2] || '—');
+      }
       return;
     }
     appendLog(msg.replace(/↵/g, '\n'));
@@ -555,6 +775,7 @@ async function startDownload() {
 
   currentEvtSrc.onerror = () => {
     currentEvtSrc.close();
+    clearProgress();
     appendLog('⚠  Stream disconnected.');
     finishJob(jobId);
   };
@@ -573,9 +794,10 @@ async function finishJob(jobId) {
 }
 
 function resetBtn() {
-  const btn = document.getElementById('btnStart');
-  btn.disabled = false;
-  btn.classList.remove('running');
+  const btnStart = document.getElementById('btnStart');
+  btnStart.disabled = false;
+  btnStart.classList.remove('running');
+  document.getElementById('btnFetch').disabled = false;
 }
 
 // ── Job list ──────────────────────────────────────────────────────────────────
@@ -597,7 +819,6 @@ function renderJobList() {
 
 function viewJob(jobId) {
   if (jobId === currentJobId) return;
-  // Show a note — full log replay not stored in browser
   clearLog();
   appendLog(`// Job #${jobId} selected.`);
   appendLog(`// Live log only available during active download.`);
