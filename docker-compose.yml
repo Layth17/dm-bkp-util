@@ -4,7 +4,7 @@ services:
     container_name: dm-retriever
     restart: unless-stopped
     ports:
-      - "8686:8686"          # Change the left number to use a different host port
+      - "8946:8946"          # Change the left number to use a different host port
     volumes:
       - ./downloads:/downloads   # Videos land in ./downloads on your machine
     environment:
