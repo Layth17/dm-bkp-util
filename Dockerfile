@@ -24,6 +24,6 @@ COPY app/ .
 RUN mkdir -p /downloads
 ENV DOWNLOAD_DIR=/downloads
 
-EXPOSE 8080
+EXPOSE 8686
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8686"]
