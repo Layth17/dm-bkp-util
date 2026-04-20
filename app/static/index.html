@@ -445,15 +445,20 @@ function classifyLine(msg) {
   return 'info';
 }
 
+function atBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+}
+
 function appendLog(msg) {
   const t      = document.getElementById('terminal');
+  const snap   = atBottom(t);
   const cursor = t.querySelector('.cursor');
   const line   = document.createElement('div');
   line.className = 'log-line ' + classifyLine(msg);
   line.textContent = msg;
   if (cursor) t.insertBefore(line, cursor);
   else        t.appendChild(line);
-  t.scrollTop = t.scrollHeight;
+  if (snap) t.scrollTop = t.scrollHeight;
 }
 
 let progEl = null;
@@ -615,10 +620,11 @@ function renderJobList() {
         <button class="jbtn stop"   onclick="stopJob('${j.id}',event)">⏹ Stop</button>
       </div>`;
     }
+    const ts = j.id.match(/(\d{8}_\d{6})$/)?.[1]?.replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/, '$3/$2 $4:$5') ?? '';
     return `
       <div class="job-item${isSelected ? ' selected' : ''}" onclick="viewJob('${j.id}')">
-        <span class="jid">${j.id}</span>
         <span class="jusr">@${j.username}</span>
+        <span class="jid">${ts}</span>
         <span class="jst ${j.status}">${j.status}</span>
         ${actions}
       </div>`;
