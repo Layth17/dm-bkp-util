@@ -132,6 +132,14 @@ def run_download(job_id: str, username: str, quality: str,
         root = Path(job["output_path"])
         root.mkdir(parents=True, exist_ok=True)
 
+        archive_path = root / ".download_archive"
+        resuming     = archive_path.exists()
+        log(f"📂  Output directory: {root}")
+        if resuming:
+            log(f"♻️   Resuming — archive found, already-downloaded videos will be skipped.")
+        else:
+            log(f"🆕  Fresh download — starting from scratch.")
+
         fmt = "bestvideo+bestaudio/best" if quality == "best" \
               else f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
 
@@ -187,6 +195,10 @@ def run_download(job_id: str, username: str, quality: str,
                 "logger": ListLogger(logs),
                 "progress_hooks": [progress_hook],
                 "quiet": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+                "download_archive": str(archive_path),
             }
             if cookies_path:
                 opts["cookiefile"] = cookies_path
@@ -228,6 +240,8 @@ def run_download(job_id: str, username: str, quality: str,
             with yt_dlp.YoutubeDL(make_opts(pl_dir)) as ydl:
                 for v_idx, vid_id in enumerate(video_ids, 1):
                     check_control()
+                    if v_idx > 1:
+                        time.sleep(2)
                     log(f"  ⬇  [{v_idx}/{len(video_ids)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
@@ -245,6 +259,8 @@ def run_download(job_id: str, username: str, quality: str,
             with yt_dlp.YoutubeDL(make_opts(unc_dir)) as ydl:
                 for v_idx, vid_id in enumerate(sorted(uncategorized), 1):
                     check_control()
+                    if v_idx > 1:
+                        time.sleep(2)
                     log(f"  ⬇  [{v_idx}/{len(uncategorized)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
@@ -273,7 +289,7 @@ def run_download(job_id: str, username: str, quality: str,
 # ── API routes ────────────────────────────────────────────────────────────────
 
 def make_job_id(username: str) -> str:
-    slug = re.sub(r"[^\w\-]", "_", username.strip().lower())
+    slug = username.strip().lower()
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{slug}_{ts}"
 
@@ -325,7 +341,8 @@ async def start_download(
             pass
 
     sub      = subfolder.strip().strip("/")
-    out_root = DOWNLOAD_ROOT / sub / job_id if sub else DOWNLOAD_ROOT / job_id
+    slug     = re.sub(r"[^\w\-]", "_", username.strip().lower())
+    out_root = DOWNLOAD_ROOT / sub / slug if sub else DOWNLOAD_ROOT / slug
 
     jobs[job_id] = {
         "id": job_id,
