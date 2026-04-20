@@ -647,7 +647,7 @@ setInterval(pollJobs, 2000);
 (async () => {
   const el = document.getElementById('ipInfo');
   try {
-    const d = await fetch('https://ipinfo.io/json').then(r => r.json());
+    const d = await fetch('/api/ipinfo').then(r => r.json());
     const loc = [d.city, d.region, d.country].filter(Boolean).join(', ');
     const org = d.org || '';
     el.innerHTML = `<span class="ip-addr">${d.ip}</span><br>${loc}<br><span style="font-size:.63rem">${org}</span>`;

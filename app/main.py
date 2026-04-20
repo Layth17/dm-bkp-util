@@ -278,6 +278,16 @@ def make_job_id(username: str) -> str:
     return f"{slug}_{ts}"
 
 
+@app.get("/api/ipinfo")
+async def ipinfo():
+    try:
+        resp = requests.get("https://ipinfo.io/json", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
 @app.get("/api/channel/playlists")
 async def channel_playlists(username: str):
     try:
