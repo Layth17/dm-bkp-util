@@ -5,7 +5,6 @@ Dailymotion Downloader — FastAPI Backend
 import asyncio
 import json
 import os
-import queue
 import re
 import tempfile
 import threading
@@ -18,7 +17,6 @@ import requests
 import yt_dlp
 from fastapi import BackgroundTasks, FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Dailymotion Downloader")
 
@@ -27,7 +25,7 @@ app = FastAPI(title="Dailymotion Downloader")
 DOWNLOAD_ROOT = Path(os.environ.get("DOWNLOAD_DIR", "/downloads"))
 DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
-# jobs: id → { status, log_queue, meta }
+# jobs: id → { status, logs, pause_event, stop_event, ... }
 jobs: dict[str, dict] = {}
 
 DM_API = "https://api.dailymotion.com"
@@ -67,12 +65,12 @@ def get_all_video_ids(username: str) -> set[str]:
     return {v["id"] for v in videos}
 
 
-def get_playlist_video_ids(playlist_id: str) -> set[str]:
+def get_playlist_video_ids(playlist_id: str) -> list[str]:
     videos = fetch_all_pages(
         f"{DM_API}/playlist/{playlist_id}/videos",
         {"fields": "id"},
     )
-    return {v["id"] for v in videos}
+    return [v["id"] for v in videos]
 
 
 def sanitize(name: str) -> str:
@@ -81,37 +79,53 @@ def sanitize(name: str) -> str:
     return name.strip(". ") or "Untitled"
 
 
+# ── Custom exception for clean stop ──────────────────────────────────────────
+
+class StopRequested(Exception):
+    pass
+
+
 # ── Download worker (runs in a thread) ───────────────────────────────────────
 
-class QueueLogger:
-    """yt-dlp logger that forwards messages to a thread-safe queue."""
-    def __init__(self, q: queue.Queue):
-        self.q = q
+class ListLogger:
+    """yt-dlp logger that appends messages to the job's log list."""
+    def __init__(self, logs: list):
+        self.logs = logs
 
     def debug(self, msg):
-        # suppress yt-dlp debug noise and raw download-progress lines
         if msg.startswith("[debug]") or msg.startswith("[download]"):
             return
-        self.q.put(msg)
+        self.logs.append(msg)
 
     def info(self, msg):
-        self.q.put(msg)
+        self.logs.append(msg)
 
     def warning(self, msg):
-        self.q.put(f"⚠  {msg}")
+        self.logs.append(f"⚠  {msg}")
 
     def error(self, msg):
-        self.q.put(f"✗  {msg}")
+        self.logs.append(f"✗  {msg}")
 
 
 def run_download(job_id: str, username: str, quality: str,
                  skip_uncategorized: bool, cookies_path: Optional[str],
                  selected_playlist_ids: Optional[list[str]] = None):
     job = jobs[job_id]
-    log_q: queue.Queue = job["log_queue"]
+    logs: list = job["logs"]
+    pause_event: threading.Event = job["pause_event"]
+    stop_event: threading.Event  = job["stop_event"]
 
     def log(msg: str):
-        log_q.put(msg)
+        logs.append(msg)
+
+    def check_control():
+        """Raise StopRequested if stopped; block if paused."""
+        if stop_event.is_set():
+            raise StopRequested()
+        while pause_event.is_set():
+            if stop_event.is_set():
+                raise StopRequested()
+            time.sleep(0.3)
 
     try:
         job["status"] = "running"
@@ -123,8 +137,25 @@ def run_download(job_id: str, username: str, quality: str,
 
         def make_opts(out_dir: Path) -> dict:
             last_prog_time = [0.0]
+            paused_logged  = [False]
 
             def progress_hook(d):
+                if stop_event.is_set():
+                    raise StopRequested()
+
+                if pause_event.is_set():
+                    if not paused_logged[0]:
+                        logs.append("⏸  Paused — waiting…")
+                        job["status"] = "paused"
+                        paused_logged[0] = True
+                    while pause_event.is_set():
+                        if stop_event.is_set():
+                            raise StopRequested()
+                        time.sleep(0.3)
+                    logs.append("▶  Resumed.")
+                    job["status"] = "running"
+                    paused_logged[0] = False
+
                 if d["status"] == "downloading":
                     now = time.monotonic()
                     if now - last_prog_time[0] < 1.0:
@@ -134,12 +165,12 @@ def run_download(job_id: str, username: str, quality: str,
                     total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
                     pct = (downloaded / total * 100) if total else 0
                     speed = d.get("speed") or 0
-                    eta = d.get("eta")
+                    eta   = d.get("eta")
                     speed_str = f"{speed / 1_048_576:.1f} MiB/s" if speed else "—"
-                    eta_str = f"{int(eta) // 60}:{int(eta) % 60:02d}" if eta else "—"
-                    log_q.put(f"__PROG__{pct:.1f}|{speed_str}|{eta_str}")
+                    eta_str   = f"{int(eta) // 60}:{int(eta) % 60:02d}" if eta else "—"
+                    logs.append(f"__PROG__{pct:.1f}|{speed_str}|{eta_str}")
                 elif d["status"] == "finished":
-                    log_q.put("__PROG__DONE__")
+                    logs.append("__PROG__DONE__")
 
             opts = {
                 "format": fmt,
@@ -153,7 +184,7 @@ def run_download(job_id: str, username: str, quality: str,
                 "noplaylist": True,
                 "retries": 5,
                 "fragment_retries": 5,
-                "logger": QueueLogger(log_q),
+                "logger": ListLogger(logs),
                 "progress_hooks": [progress_hook],
                 "quiet": True,
             }
@@ -165,15 +196,14 @@ def run_download(job_id: str, username: str, quality: str,
         log(f"📋  Fetching playlists for @{username}…")
         playlists = get_playlists(username)
 
-        # Filter to selected playlists if provided
-        if selected_playlist_ids is not None:
+        if selected_playlist_ids:
             selected_set = set(selected_playlist_ids)
             playlists = [pl for pl in playlists if pl["id"] in selected_set]
 
         log(f"    Downloading {len(playlists)} playlist(s).")
 
         # 2. Fetch all video IDs
-        log(f"🎞  Fetching full video list…")
+        log("🎞  Fetching full video list…")
         all_ids = get_all_video_ids(username)
         log(f"    Found {len(all_ids)} video(s) total.")
 
@@ -181,24 +211,28 @@ def run_download(job_id: str, username: str, quality: str,
 
         # 3. Download playlists
         for idx, pl in enumerate(playlists, 1):
+            check_control()
             pl_id   = pl["id"]
             pl_name = sanitize(pl.get("name") or f"Playlist_{pl_id}")
             pl_dir  = root / f"{idx:02d}_{pl_name}"
             pl_dir.mkdir(parents=True, exist_ok=True)
 
             video_ids = get_playlist_video_ids(pl_id)
-            categorized |= video_ids
+            categorized.update(video_ids)
 
             log(f"\n▶  [{idx}/{len(playlists)}] '{pl_name}'  ({len(video_ids)} video(s))")
 
-            manifest = {"id": pl_id, "name": pl.get("name"), "video_ids": list(video_ids)}
+            manifest = {"id": pl_id, "name": pl.get("name"), "video_ids": video_ids}
             (pl_dir / "_playlist_info.json").write_text(json.dumps(manifest, indent=2))
 
             with yt_dlp.YoutubeDL(make_opts(pl_dir)) as ydl:
                 for v_idx, vid_id in enumerate(video_ids, 1):
+                    check_control()
                     log(f"  ⬇  [{v_idx}/{len(video_ids)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
+                    except StopRequested:
+                        raise
                     except Exception as exc:
                         log(f"  ✗  {vid_id}: {exc}")
 
@@ -209,10 +243,13 @@ def run_download(job_id: str, username: str, quality: str,
             unc_dir.mkdir(parents=True, exist_ok=True)
             log(f"\n▶  Uncategorized ({len(uncategorized)} video(s))")
             with yt_dlp.YoutubeDL(make_opts(unc_dir)) as ydl:
-                for v_idx, vid_id in enumerate(uncategorized, 1):
+                for v_idx, vid_id in enumerate(sorted(uncategorized), 1):
+                    check_control()
                     log(f"  ⬇  [{v_idx}/{len(uncategorized)}] {vid_id}")
                     try:
                         ydl.download([f"https://www.dailymotion.com/video/{vid_id}"])
+                    except StopRequested:
+                        raise
                     except Exception as exc:
                         log(f"  ✗  {vid_id}: {exc}")
         elif uncategorized and skip_uncategorized:
@@ -221,19 +258,21 @@ def run_download(job_id: str, username: str, quality: str,
         log(f"\n✅  Done! Files saved to: {root}")
         job["status"] = "done"
 
+    except StopRequested:
+        log("\n⏹  Download stopped by user.")
+        job["status"] = "stopped"
     except Exception as exc:
         log(f"\n❌  Fatal error: {exc}")
         job["status"] = "error"
     finally:
         if cookies_path and os.path.exists(cookies_path):
             os.unlink(cookies_path)
-        log_q.put(None)  # sentinel
+        logs.append(None)  # sentinel — stream finished
 
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
 def make_job_id(username: str) -> str:
-    """e.g.  johndoe_20250419_143022"""
     slug = re.sub(r"[^\w\-]", "_", username.strip().lower())
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{slug}_{ts}"
@@ -242,8 +281,7 @@ def make_job_id(username: str) -> str:
 @app.get("/api/channel/playlists")
 async def channel_playlists(username: str):
     try:
-        playlists = get_playlists(username)
-        return playlists
+        return get_playlists(username)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -255,7 +293,7 @@ async def start_download(
     quality: str   = Form("best"),
     skip_uncategorized: bool = Form(False),
     subfolder: str = Form(""),
-    playlist_ids: str = Form(""),   # JSON array string, empty = all
+    playlist_ids: str = Form(""),
     cookies: Optional[UploadFile] = File(None),
 ):
     job_id = make_job_id(username)
@@ -267,15 +305,15 @@ async def start_download(
         tmp.close()
         cookies_path = tmp.name
 
-    # Parse selected playlist IDs
     selected_ids: Optional[list[str]] = None
     if playlist_ids.strip():
         try:
-            selected_ids = json.loads(playlist_ids)
+            parsed = json.loads(playlist_ids)
+            if parsed:  # empty list = download all
+                selected_ids = parsed
         except Exception:
             pass
 
-    # Resolve output: /downloads/{subfolder}/{job_id}  or  /downloads/{job_id}
     sub      = subfolder.strip().strip("/")
     out_root = DOWNLOAD_ROOT / sub / job_id if sub else DOWNLOAD_ROOT / job_id
 
@@ -283,7 +321,9 @@ async def start_download(
         "id": job_id,
         "username": username,
         "status": "pending",
-        "log_queue": queue.Queue(),
+        "logs": [],
+        "pause_event": threading.Event(),
+        "stop_event":  threading.Event(),
         "output_path": str(out_root),
     }
 
@@ -297,27 +337,59 @@ async def start_download(
     return {"job_id": job_id}
 
 
+@app.post("/api/jobs/{job_id}/pause")
+async def pause_job(job_id: str):
+    if job_id not in jobs:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    job = jobs[job_id]
+    if job["status"] == "running":
+        job["pause_event"].set()
+        job["status"] = "paused"
+    return {"status": job["status"]}
+
+
+@app.post("/api/jobs/{job_id}/resume")
+async def resume_job(job_id: str):
+    if job_id not in jobs:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    job = jobs[job_id]
+    if job["status"] == "paused":
+        job["pause_event"].clear()
+        job["status"] = "running"
+    return {"status": job["status"]}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def stop_job(job_id: str):
+    if job_id not in jobs:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    job = jobs[job_id]
+    job["pause_event"].clear()   # unblock if paused so thread can exit
+    job["stop_event"].set()
+    return {"status": "stopping"}
+
+
 @app.get("/api/jobs/{job_id}/logs")
 async def stream_logs(job_id: str):
     if job_id not in jobs:
         return JSONResponse({"error": "Job not found"}, status_code=404)
 
-    log_q: queue.Queue = jobs[job_id]["log_queue"]
+    job_logs: list = jobs[job_id]["logs"]
 
     async def event_generator():
+        pos = 0
         while True:
-            try:
-                msg = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: log_q.get(timeout=1)
-                )
-                if msg is None:   # sentinel — stream finished
-                    yield f"data: __DONE__\n\n"
+            if pos < len(job_logs):
+                msg = job_logs[pos]
+                pos += 1
+                if msg is None:
+                    yield "data: __DONE__\n\n"
                     break
                 safe = msg.replace("\n", "↵")
                 yield f"data: {safe}\n\n"
-            except queue.Empty:
-                yield f"data: __PING__\n\n"
-                await asyncio.sleep(0.5)
+            else:
+                yield "data: __PING__\n\n"
+                await asyncio.sleep(0.3)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
