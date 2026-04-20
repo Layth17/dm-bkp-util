@@ -341,7 +341,7 @@ async def start_download(
             pass
 
     sub      = subfolder.strip().strip("/")
-    slug     = re.sub(r"[^\w\-]", "_", username.strip().lower())
+    slug     = username.strip().lower()
     out_root = DOWNLOAD_ROOT / sub / slug if sub else DOWNLOAD_ROOT / slug
 
     jobs[job_id] = {
