@@ -1,4 +1,4 @@
-This project is largely vibe coded and is still a W.I.P (it does work, though).
+Disclosure: This project is largely vibe coded and is still a W.I.P (it does work, though).
 
 # DM Retriever — Setup & Usage
 
