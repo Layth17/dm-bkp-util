@@ -6,11 +6,11 @@ import asyncio
 import json
 import os
 import queue
-import shutil
+import re
 import tempfile
 import threading
 import time
-import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -113,7 +113,7 @@ def run_download(job_id: str, username: str, quality: str,
 
     try:
         job["status"] = "running"
-        root = DOWNLOAD_ROOT / job_id
+        root = Path(job["output_path"])
         root.mkdir(parents=True, exist_ok=True)
 
         fmt = "bestvideo+bestaudio/best" if quality == "best" \
@@ -161,7 +161,7 @@ def run_download(job_id: str, username: str, quality: str,
             video_ids = get_playlist_video_ids(pl_id)
             categorized |= video_ids
 
-            log(f"\n▶  [{idx}/{len(playlists)}] '{pl_name}' ({len(video_ids)} video(s))")
+            log(f"\n▶  [{idx}/{len(playlists)}] '{pl_name}'  ({len(video_ids)} video(s))")
 
             manifest = {"id": pl_id, "name": pl.get("name"), "video_ids": list(video_ids)}
             (pl_dir / "_playlist_info.json").write_text(json.dumps(manifest, indent=2))
@@ -192,7 +192,6 @@ def run_download(job_id: str, username: str, quality: str,
 
         log(f"\n✅  Done! Files saved to: {root}")
         job["status"] = "done"
-        job["output_path"] = str(root)
 
     except Exception as exc:
         log(f"\n❌  Fatal error: {exc}")
@@ -205,15 +204,23 @@ def run_download(job_id: str, username: str, quality: str,
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
+def make_job_id(username: str) -> str:
+    """e.g.  johndoe_20250419_143022"""
+    slug = re.sub(r"[^\w\-]", "_", username.strip().lower())
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{slug}_{ts}"
+
+
 @app.post("/api/start")
 async def start_download(
     background_tasks: BackgroundTasks,
-    username: str = Form(...),
-    quality: str  = Form("best"),
+    username: str  = Form(...),
+    quality: str   = Form("best"),
     skip_uncategorized: bool = Form(False),
+    subfolder: str = Form(""),
     cookies: Optional[UploadFile] = File(None),
 ):
-    job_id = str(uuid.uuid4())[:8]
+    job_id = make_job_id(username)
     cookies_path = None
 
     if cookies and cookies.filename:
@@ -222,12 +229,16 @@ async def start_download(
         tmp.close()
         cookies_path = tmp.name
 
+    # Resolve output: /downloads/{subfolder}/{job_id}  or  /downloads/{job_id}
+    sub      = subfolder.strip().strip("/")
+    out_root = DOWNLOAD_ROOT / sub / job_id if sub else DOWNLOAD_ROOT / job_id
+
     jobs[job_id] = {
         "id": job_id,
         "username": username,
         "status": "pending",
         "log_queue": queue.Queue(),
-        "output_path": None,
+        "output_path": str(out_root),
     }
 
     thread = threading.Thread(

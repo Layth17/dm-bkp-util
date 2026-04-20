@@ -395,6 +395,14 @@
 
     <div style="margin-top:1.1rem;" class="grid-2">
       <div>
+        <label for="subfolder">Download Subfolder <span style="text-transform:none;letter-spacing:0;font-size:.65rem;">(optional, inside ./downloads/)</span></label>
+        <input type="text" id="subfolder" placeholder="e.g. my_backup or leave blank" autocomplete="off" />
+      </div>
+      <div></div>
+    </div>
+
+    <div style="margin-top:1.1rem;" class="grid-2">
+      <div>
         <label>Cookies File <span style="text-transform:none;letter-spacing:0;font-size:.65rem;">(optional, for private videos)</span></label>
         <div class="file-drop" id="fileDrop">
           <input type="file" id="cookiesFile" accept=".txt" />
@@ -507,6 +515,7 @@ async function startDownload() {
   const fd = new FormData();
   fd.append('username',          username);
   fd.append('quality',           document.getElementById('quality').value);
+  fd.append('subfolder',         document.getElementById('subfolder').value.trim());
   fd.append('skip_uncategorized', document.getElementById('skipUncat').checked);
   const cookieFile = document.getElementById('cookiesFile').files[0];
   if (cookieFile) fd.append('cookies', cookieFile);
@@ -527,7 +536,7 @@ async function startDownload() {
   jobsCache[jobId] = { id: jobId, username, status: 'running' };
   renderJobList();
 
-  appendLog(`// Job ${jobId} started for @${username}`);
+  appendLog(`// Job started: ${jobId}`);
   setStatus('running', `job ${jobId} — downloading…`);
 
   // SSE stream
