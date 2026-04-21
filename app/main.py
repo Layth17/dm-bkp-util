@@ -231,7 +231,7 @@ def run_download(job_id: str, username: str, quality: str,
             check_control()
             pl_id   = pl["id"]
             pl_name = sanitize(pl.get("name") or f"Playlist_{pl_id}")
-            pl_dir  = root / f"{idx:02d}_{pl_name}"
+            pl_dir  = root / pl_name
             pl_dir.mkdir(parents=True, exist_ok=True)
 
             video_ids = get_playlist_video_ids(pl_id)
