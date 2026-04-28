@@ -4,6 +4,10 @@ Disclosure: This project is largely vibe coded.
 
 A local web UI for downloading a Dailymotion channel's content, organized by playlist. Supports resuming interrupted downloads, parallel jobs, and pause/stop/resume controls.
 
+## Demo Picture
+
+![](./Screenshot.png)
+
 ## Requirements
 
 - [Docker](https://docs.docker.com/get-docker/) + Docker Compose (included with Docker Desktop)
